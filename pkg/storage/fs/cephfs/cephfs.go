@@ -32,7 +32,6 @@ import (
 	userpb "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
 	userv1beta1 "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
-	"github.com/ceph/go-ceph"
 	"github.com/cs3org/reva/pkg/appctx"
 	"github.com/cs3org/reva/pkg/errtypes"
 	"github.com/cs3org/reva/pkg/logger"
@@ -170,6 +169,8 @@ func New(m map[string]interface{}) (storage.FS, error) {
 
 		return nil, err
 	}
+	mount.Init()
+	var cl = &CephClient{rados: conn, cephfs: mount}
 
 	// the root node has an empty name
 	// the root node has no parent
@@ -178,17 +179,18 @@ func New(m map[string]interface{}) (storage.FS, error) {
 		&userv1beta1.UserId{
 			OpaqueId: o.Owner,
 		},
+		mount,
 	); err != nil {
 		return nil, err
 	}
 
-	tp, err := NewTree(lu)
+	tp, err := NewTree(lu, cl)
 	if err != nil {
 		return nil, err
 	}
 
 	return &cephfs{
-		cl:           &CephClient{rados: conn, cephfs: mount},
+		cl:           cl,
 		tp:           tp,
 		lu:           lu,
 		o:            o,

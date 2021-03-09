@@ -31,18 +31,19 @@ import (
 	"github.com/cs3org/reva/pkg/errtypes"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
-	"github.com/pkg/xattr"
 )
 
 // Tree manages a hierarchical tree
 type Tree struct {
 	lu *Lookup
+	cl *CephClient
 }
 
 // NewTree creates a new Tree instance
-func NewTree(lu *Lookup) (TreePersistence, error) {
+func NewTree(lu *Lookup, cl *CephClient) (TreePersistence, error) {
 	return &Tree{
 		lu: lu,
+		cl: cl,
 	}, nil
 }
 
@@ -73,12 +74,11 @@ func (t *Tree) GetPathByID(ctx context.Context, id *provider.ResourceId) (relati
 
 // does not take care of linking back to parent
 // TODO check if node exists?
-func createNode(n *Node, owner *userpb.UserId) (err error) {
+func createNode(n *Node, owner *userpb.UserId, mount *cephfs2.MountInfo) (err error) {
 	// create a directory node
 	nodePath := n.lu.toInternalPath(n.ID)
-	var mount, error = cephfs2.CreateMount()
-	mount.MakeDir(nodePath, 0700)
-	if err = os.MkdirAll(nodePath, 0700); err != nil {
+
+	if err = mount.MakeDir(nodePath, 0700); err != nil {
 		return errors.Wrap(err, "cephfs: error creating node")
 	}
 
@@ -107,13 +107,13 @@ func (t *Tree) CreateDir(ctx context.Context, node *Node) (err error) {
 		return
 	}
 
-	err = createNode(node, owner)
+	err = createNode(node, owner, t.cl.cephfs)
 	if err != nil {
 		return nil
 	}
 
 	// make child appear in listings
-	err = os.Symlink("../"+node.ID, filepath.Join(t.lu.toInternalPath(node.ParentID), node.Name))
+	err = t.cl.cephfs.Symlink("../"+node.ID, filepath.Join(t.lu.toInternalPath(node.ParentID), node.Name))
 	if err != nil {
 		return
 	}
@@ -125,7 +125,7 @@ func (t *Tree) Move(ctx context.Context, oldNode *Node, newNode *Node) (err erro
 	// if target exists delete it without trashing it
 	if newNode.Exists {
 		// TODO make sure all children are deleted
-		if err := os.RemoveAll(t.lu.toInternalPath(newNode.ID)); err != nil {
+		if err := t.cl.cephfs.RemoveDir(t.lu.toInternalPath(newNode.ID)); err != nil {
 			return errors.Wrap(err, "cephfs: Move: error deleting target node "+newNode.ID)
 		}
 	}
@@ -141,7 +141,7 @@ func (t *Tree) Move(ctx context.Context, oldNode *Node, newNode *Node) (err erro
 		parentPath := t.lu.toInternalPath(oldNode.ParentID)
 
 		// rename child
-		err = os.Rename(
+		err = t.cl.cephfs.Rename(
 			filepath.Join(parentPath, oldNode.Name),
 			filepath.Join(parentPath, newNode.Name),
 		)
@@ -150,7 +150,7 @@ func (t *Tree) Move(ctx context.Context, oldNode *Node, newNode *Node) (err erro
 		}
 
 		// update name attribute
-		if err := xattr.Set(tgtPath, nameAttr, []byte(newNode.Name)); err != nil {
+		if err := t.cl.cephfs.SetXattr(tgtPath, nameAttr, []byte(newNode.Name), 0); err != nil {
 			return errors.Wrap(err, "cephfs: could not set name attribute")
 		}
 
@@ -161,7 +161,7 @@ func (t *Tree) Move(ctx context.Context, oldNode *Node, newNode *Node) (err erro
 	// bring old node to the new parent
 
 	// rename child
-	err = os.Rename(
+	err = t.cl.cephfs.Rename(
 		filepath.Join(t.lu.toInternalPath(oldNode.ParentID), oldNode.Name),
 		filepath.Join(t.lu.toInternalPath(newNode.ParentID), newNode.Name),
 	)
@@ -170,10 +170,10 @@ func (t *Tree) Move(ctx context.Context, oldNode *Node, newNode *Node) (err erro
 	}
 
 	// update target parentid and name
-	if err := xattr.Set(tgtPath, parentidAttr, []byte(newNode.ParentID)); err != nil {
+	if err := t.cl.cephfs.SetXattr(tgtPath, parentidAttr, []byte(newNode.ParentID), 0); err != nil {
 		return errors.Wrap(err, "cephfs: could not set parentid attribute")
 	}
-	if err := xattr.Set(tgtPath, nameAttr, []byte(newNode.Name)); err != nil {
+	if err := t.cl.cephfs.SetXattr(tgtPath, nameAttr, []byte(newNode.Name), 0); err != nil {
 		return errors.Wrap(err, "cephfs: could not set name attribute")
 	}
 
@@ -195,7 +195,7 @@ func (t *Tree) Move(ctx context.Context, oldNode *Node, newNode *Node) (err erro
 // ListFolder lists the content of a folder node
 func (t *Tree) ListFolder(ctx context.Context, node *Node) ([]*Node, error) {
 	dir := t.lu.toInternalPath(node.ID)
-	f, err := os.Open(dir)
+	f, err := t.cl.cephfs.OpenDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, errtypes.NotFound(dir)
@@ -204,13 +204,17 @@ func (t *Tree) ListFolder(ctx context.Context, node *Node) ([]*Node, error) {
 	}
 	defer f.Close()
 
-	names, err := f.Readdirnames(0)
+	var names = []string{}
+	var dentry *cephfs2.DirEntry
+	for dentry, err = f.ReadDir(); err == nil && dentry != nil; dentry, err = f.ReadDir() {
+		names = append(names, dentry.Name())
+	}
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "tree: error listing children of "+dir)
 	}
 	nodes := []*Node{}
 	for i := range names {
-		link, err := os.Readlink(filepath.Join(dir, names[i]))
+		link, err := t.cl.cephfs.Readlink(filepath.Join(dir, names[i]))
 		if err != nil {
 			// TODO log
 			continue
@@ -242,7 +246,7 @@ func (t *Tree) Delete(ctx context.Context, n *Node) (err error) {
 		// fall back to root trash
 		o.OpaqueId = "root"
 	}
-	err = os.MkdirAll(filepath.Join(t.lu.Options.Root, "trash", o.OpaqueId), 0700)
+	err = t.cl.cephfs.MakeDir(filepath.Join(t.lu.Options.Root, "trash", o.OpaqueId), 0700)
 	if err != nil {
 		return
 	}
@@ -255,7 +259,7 @@ func (t *Tree) Delete(ctx context.Context, n *Node) (err error) {
 
 	// set origin location in metadata
 	nodePath := t.lu.toInternalPath(n.ID)
-	if err := xattr.Set(nodePath, trashOriginAttr, []byte(origin)); err != nil {
+	if err := t.cl.cephfs.SetXattr(nodePath, trashOriginAttr, []byte(origin), 0); err != nil {
 		return err
 	}
 
@@ -264,7 +268,7 @@ func (t *Tree) Delete(ctx context.Context, n *Node) (err error) {
 	// first make node appear in the owners (or root) trash
 	// parent id and name are stored as extended attributes in the node itself
 	trashLink := filepath.Join(t.lu.Options.Root, "trash", o.OpaqueId, n.ID)
-	err = os.Symlink("../../nodes/"+n.ID+".T."+deletionTime, trashLink)
+	err = t.cl.cephfs.Symlink("../../nodes/"+n.ID+".T."+deletionTime, trashLink)
 	if err != nil {
 		// To roll back changes
 		// TODO unset trashOriginAttr
@@ -275,7 +279,7 @@ func (t *Tree) Delete(ctx context.Context, n *Node) (err error) {
 
 	// rename the trashed node so it is not picked up when traversing up the tree and matches the symlink
 	trashPath := nodePath + ".T." + deletionTime
-	err = os.Rename(nodePath, trashPath)
+	err = t.cl.cephfs.Rename(nodePath, trashPath)
 	if err != nil {
 		// To roll back changes
 		// TODO remove symlink
@@ -285,7 +289,8 @@ func (t *Tree) Delete(ctx context.Context, n *Node) (err error) {
 
 	// finally remove the entry from the parent dir
 	src := filepath.Join(t.lu.toInternalPath(n.ParentID), n.Name)
-	err = os.Remove(src)
+
+	err = t.cl.cephfs.Unlink(src)
 	if err != nil {
 		// To roll back changes
 		// TODO revert the rename
