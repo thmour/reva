@@ -20,6 +20,7 @@ package cephfs
 
 import (
 	"context"
+	cephfs2 "github.com/ceph/go-ceph/cephfs"
 	"io"
 	"net/url"
 	"os"
@@ -40,7 +41,6 @@ import (
 	"github.com/cs3org/reva/pkg/user"
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
-	"github.com/pkg/xattr"
 )
 
 const (
@@ -93,7 +93,7 @@ const (
 )
 
 func init() {
-	registry.Register("mount", New)
+	registry.Register("cephfs", New)
 }
 
 func parseConfig(m map[string]interface{}) (*Options, error) {
@@ -131,7 +131,7 @@ func New(m map[string]interface{}) (storage.FS, error) {
 	}
 	o.init(m)
 
-	cl, err := NewCephClientPool(); if err != nil { return nil, err }
+	mount, err := NewCephMount(); if err != nil { return nil, err }
 
 	// create data paths for internal layout
 	dataPaths := []string{
@@ -142,7 +142,7 @@ func New(m map[string]interface{}) (storage.FS, error) {
 		filepath.Join(o.Root, "trash"),
 	}
 	for _, v := range dataPaths {
-		if err := cl.admMount.MakeDir(v, 0700); err != nil {
+		if err := mount.MakeDir(v, 0700); err != nil {
 			logger.New().Error().Err(err).
 				Str("path", v).
 				Msg("could not create data dir")
@@ -160,18 +160,18 @@ func New(m map[string]interface{}) (storage.FS, error) {
 		&userv1beta1.UserId{
 			OpaqueId: o.Owner,
 		},
-		cl.admMount,
+		mount,
 	); err != nil {
 		return nil, err
 	}
 
-	tp, err := NewTree(lu, cl)
+	tp, err := NewTree(lu, mount)
 	if err != nil {
 		return nil, err
 	}
 
 	return &cephfs{
-		cl:           cl,
+		mt:           mount,
 		tp:           tp,
 		lu:           lu,
 		o:            o,
@@ -181,15 +181,17 @@ func New(m map[string]interface{}) (storage.FS, error) {
 }
 
 type cephfs struct {
-	cl           *CephClientPool
 	tp           TreePersistence
 	lu           *Lookup
 	o            *Options
 	p            *Permissions
 	chunkHandler *chunking.ChunkHandler
+	mt           *cephfs2.MountInfo
 }
 
 func (fs *cephfs) Shutdown(ctx context.Context) error {
+	fs.mt.Release()
+
 	return nil
 }
 
@@ -276,8 +278,7 @@ func (fs *cephfs) CreateHome(ctx context.Context) (err error) {
 	if fs.o.TreeTimeAccounting {
 		homePath := h.lu.toInternalPath(h.ID)
 		// mark the home node as the end of propagation
-		mount, err := fs.cl.get(u); if err != nil { return err }
-		if err = mount.SetXattr(homePath, propagationAttr, []byte("1"), 0); err != nil {
+		if err = fs.mt.SetXattr(homePath, propagationAttr, []byte("1"), 0); err != nil {
 			appctx.GetLogger(ctx).Error().Err(err).Interface("node", h).Msg("could not mark home as propagation root")
 			return
 		}
@@ -332,7 +333,7 @@ func (fs *cephfs) CreateDir(ctx context.Context, fn string) (err error) {
 	if fs.o.TreeTimeAccounting {
 		nodePath := n.lu.toInternalPath(n.ID)
 		// mark the home node as the end of propagation
-		if err = xattr.Set(nodePath, propagationAttr, []byte("1")); err != nil {
+		if err = fs.mt.SetXattr(nodePath, propagationAttr, []byte("1"), 0); err != nil {
 			appctx.GetLogger(ctx).Error().Err(err).Interface("node", n).Msg("could not mark node to propagate")
 			return
 		}
@@ -346,7 +347,6 @@ func (fs *cephfs) CreateDir(ctx context.Context, fn string) (err error) {
 // To mimic the eos end owncloud driver we only allow references as children of the "/Shares" folder
 // TODO when home support is enabled should the "/Shares" folder still be listed?
 func (fs *cephfs) CreateReference(ctx context.Context, p string, targetURI *url.URL) (err error) {
-
 	p = strings.Trim(p, "/")
 	parts := strings.Split(p, "/")
 
@@ -382,7 +382,7 @@ func (fs *cephfs) CreateReference(ctx context.Context, p string, targetURI *url.
 	}
 
 	internal := n.lu.toInternalPath(n.ID)
-	if err = xattr.Set(internal, referenceAttr, []byte(targetURI.String())); err != nil {
+	if err = fs.mt.SetXattr(internal, referenceAttr, []byte(targetURI.String()), 0); err != nil {
 		return errors.Wrapf(err, "cephfs: error setting the target %s on the reference file %s", targetURI.String(), internal)
 	}
 	return nil
@@ -530,7 +530,7 @@ func (fs *cephfs) Download(ctx context.Context, ref *provider.Reference) (io.Rea
 
 	contentPath := fs.ContentPath(node)
 
-	r, err := os.Open(contentPath)
+	r, err := fs.mt.Open(contentPath, os.O_RDONLY, 0700)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, errtypes.NotFound(contentPath)
@@ -550,16 +550,16 @@ func (fs *cephfs) Download(ctx context.Context, ref *provider.Reference) (io.Rea
 
 func (fs *cephfs) copyMD(s string, t string) (err error) {
 	var attrs []string
-	if attrs, err = xattr.List(s); err != nil {
+	if attrs, err = fs.mt.ListXattr(s); err != nil {
 		return err
 	}
 	for i := range attrs {
 		if strings.HasPrefix(attrs[i], ocisPrefix) {
 			var d []byte
-			if d, err = xattr.Get(s, attrs[i]); err != nil {
+			if d, err = fs.mt.GetXattr(s, attrs[i]); err != nil {
 				return err
 			}
-			if err = xattr.Set(t, attrs[i], d); err != nil {
+			if err = fs.mt.SetXattr(t, attrs[i], d, 0); err != nil {
 				return err
 			}
 		}

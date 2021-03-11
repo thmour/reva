@@ -20,8 +20,7 @@ package cephfs
 
 import (
 	"context"
-	"os"
-
+	cephfs2 "github.com/ceph/go-ceph/cephfs"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
 )
 
@@ -31,7 +30,7 @@ import (
 // TreePersistence is used to manage a tree hierarchy
 type TreePersistence interface {
 	GetPathByID(ctx context.Context, id *provider.ResourceId) (string, error)
-	GetMD(ctx context.Context, node *Node) (os.FileInfo, error)
+	GetMD(ctx context.Context, node *Node) (*cephfs2.CephStatx, error)
 	ListFolder(ctx context.Context, node *Node) ([]*Node, error)
 	//CreateHome(owner *userpb.UserId) (n *Node, err error)
 	CreateDir(ctx context.Context, node *Node) (err error)
