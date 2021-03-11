@@ -116,7 +116,7 @@ func (fs *cephfs) DownloadRevision(ctx context.Context, ref *provider.Reference,
 		if os.IsNotExist(err) {
 			return nil, errtypes.NotFound(contentPath)
 		}
-		return nil, errors.Wrap(err, "cephfs: error opening revision "+revisionKey)
+		return nil, errors.Wrap(err, "mount: error opening revision "+revisionKey)
 	}
 	return r, nil
 }

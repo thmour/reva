@@ -20,8 +20,6 @@ package cephfs
 
 import (
 	"context"
-	cephfs2 "github.com/ceph/go-ceph/cephfs"
-	"github.com/ceph/go-ceph/rados"
 	"io"
 	"net/url"
 	"os"
@@ -95,7 +93,7 @@ const (
 )
 
 func init() {
-	registry.Register("cephfs", New)
+	registry.Register("mount", New)
 }
 
 func parseConfig(m map[string]interface{}) (*Options, error) {
@@ -133,6 +131,8 @@ func New(m map[string]interface{}) (storage.FS, error) {
 	}
 	o.init(m)
 
+	cl, err := NewCephClientPool(); if err != nil { return nil, err }
+
 	// create data paths for internal layout
 	dataPaths := []string{
 		filepath.Join(o.Root, "nodes"),
@@ -142,7 +142,7 @@ func New(m map[string]interface{}) (storage.FS, error) {
 		filepath.Join(o.Root, "trash"),
 	}
 	for _, v := range dataPaths {
-		if err := os.MkdirAll(v, 0700); err != nil {
+		if err := cl.admMount.MakeDir(v, 0700); err != nil {
 			logger.New().Error().Err(err).
 				Str("path", v).
 				Msg("could not create data dir")
@@ -153,25 +153,6 @@ func New(m map[string]interface{}) (storage.FS, error) {
 		Options: o,
 	}
 
-	var conn *rados.Conn
-	var mount *cephfs2.MountInfo
-	if conn, err = rados.NewConn(); err == nil {
-		if err = conn.ReadConfigFile(o.CephConf); err == nil {
-			if err = conn.Connect(); err == nil {
-				mount, err = cephfs2.CreateFromRados(conn)
-			}
-		}
-	}
-
-	if err != nil {
-		logger.New().Error().Err(err).
-			Msg("could not connect to cluster")
-
-		return nil, err
-	}
-	mount.Init()
-	var cl = &CephClient{rados: conn, cephfs: mount}
-
 	// the root node has an empty name
 	// the root node has no parent
 	if err = createNode(
@@ -179,7 +160,7 @@ func New(m map[string]interface{}) (storage.FS, error) {
 		&userv1beta1.UserId{
 			OpaqueId: o.Owner,
 		},
-		mount,
+		cl.admMount,
 	); err != nil {
 		return nil, err
 	}
@@ -200,7 +181,7 @@ func New(m map[string]interface{}) (storage.FS, error) {
 }
 
 type cephfs struct {
-	cl           *CephClient
+	cl           *CephClientPool
 	tp           TreePersistence
 	lu           *Lookup
 	o            *Options
@@ -291,10 +272,12 @@ func (fs *cephfs) CreateHome(ctx context.Context) (err error) {
 		return
 	}
 
+
 	if fs.o.TreeTimeAccounting {
 		homePath := h.lu.toInternalPath(h.ID)
 		// mark the home node as the end of propagation
-		if err = xattr.Set(homePath, propagationAttr, []byte("1")); err != nil {
+		mount, err := fs.cl.get(u); if err != nil { return err }
+		if err = mount.SetXattr(homePath, propagationAttr, []byte("1"), 0); err != nil {
 			appctx.GetLogger(ctx).Error().Err(err).Interface("node", h).Msg("could not mark home as propagation root")
 			return
 		}

@@ -71,24 +71,24 @@ type Node struct {
 func (n *Node) writeMetadata(owner *userpb.UserId) (err error) {
 	nodePath := n.lu.toInternalPath(n.ID)
 	if err = xattr.Set(nodePath, parentidAttr, []byte(n.ParentID)); err != nil {
-		return errors.Wrap(err, "cephfs: could not set parentid attribute")
+		return errors.Wrap(err, "mount: could not set parentid attribute")
 	}
 	if err = xattr.Set(nodePath, nameAttr, []byte(n.Name)); err != nil {
-		return errors.Wrap(err, "cephfs: could not set name attribute")
+		return errors.Wrap(err, "mount: could not set name attribute")
 	}
 	if owner == nil {
 		if err = xattr.Set(nodePath, ownerIDAttr, []byte("")); err != nil {
-			return errors.Wrap(err, "cephfs: could not set empty owner id attribute")
+			return errors.Wrap(err, "mount: could not set empty owner id attribute")
 		}
 		if err = xattr.Set(nodePath, ownerIDPAttr, []byte("")); err != nil {
-			return errors.Wrap(err, "cephfs: could not set empty owner idp attribute")
+			return errors.Wrap(err, "mount: could not set empty owner idp attribute")
 		}
 	} else {
 		if err = xattr.Set(nodePath, ownerIDAttr, []byte(owner.OpaqueId)); err != nil {
-			return errors.Wrap(err, "cephfs: could not set owner id attribute")
+			return errors.Wrap(err, "mount: could not set owner id attribute")
 		}
 		if err = xattr.Set(nodePath, ownerIDPAttr, []byte(owner.Idp)); err != nil {
-			return errors.Wrap(err, "cephfs: could not set owner idp attribute")
+			return errors.Wrap(err, "mount: could not set owner idp attribute")
 		}
 	}
 	return
@@ -241,14 +241,14 @@ func (n *Node) Child(name string) (c *Node, err error) {
 		return
 	}
 	if err != nil {
-		err = errors.Wrap(err, "cephfs: Wrap: readlink error")
+		err = errors.Wrap(err, "mount: Wrap: readlink error")
 		return
 	}
 	if strings.HasPrefix(link, "../") {
 		c.Exists = true
 		c.ID = filepath.Base(link)
 	} else {
-		err = fmt.Errorf("cephfs: expected '../ prefix, got' %+v", link)
+		err = fmt.Errorf("mount: expected '../ prefix, got' %+v", link)
 	}
 	return
 }
@@ -256,7 +256,7 @@ func (n *Node) Child(name string) (c *Node, err error) {
 // Parent returns the parent node
 func (n *Node) Parent() (p *Node, err error) {
 	if n.ParentID == "" {
-		return nil, fmt.Errorf("cephfs: root has no parent")
+		return nil, fmt.Errorf("mount: root has no parent")
 	}
 	p = &Node{
 		lu: n.lu,

@@ -64,7 +64,7 @@ func (fs *cephfs) Upload(ctx context.Context, ref *provider.Reference, r io.Read
 			return err
 		}
 		if upload, err = fs.GetUpload(ctx, uploadIDs["simple"]); err != nil {
-			return errors.Wrap(err, "cephfs: error retrieving upload")
+			return errors.Wrap(err, "mount: error retrieving upload")
 		}
 	}
 
@@ -73,7 +73,7 @@ func (fs *cephfs) Upload(ctx context.Context, ref *provider.Reference, r io.Read
 	p := uploadInfo.info.Storage["NodeName"]
 	ok, err := chunking.IsChunked(p) // check chunking v1
 	if err != nil {
-		return errors.Wrap(err, "cephfs: error checking path")
+		return errors.Wrap(err, "mount: error checking path")
 	}
 	if ok {
 		var assembledFile string
@@ -90,7 +90,7 @@ func (fs *cephfs) Upload(ctx context.Context, ref *provider.Reference, r io.Read
 		uploadInfo.info.Storage["NodeName"] = p
 		fd, err := os.Open(assembledFile)
 		if err != nil {
-			return errors.Wrap(err, "cephfs: error opening assembled file")
+			return errors.Wrap(err, "mount: error opening assembled file")
 		}
 		defer fd.Close()
 		defer os.RemoveAll(assembledFile)
@@ -98,7 +98,7 @@ func (fs *cephfs) Upload(ctx context.Context, ref *provider.Reference, r io.Read
 	}
 
 	if _, err := uploadInfo.WriteChunk(ctx, 0, r); err != nil {
-		return errors.Wrap(err, "cephfs: error writing to binary file")
+		return errors.Wrap(err, "mount: error writing to binary file")
 	}
 
 	return uploadInfo.FinishUpload(ctx)
@@ -154,7 +154,7 @@ func (fs *cephfs) InitiateUpload(ctx context.Context, ref *provider.Reference, u
 		}
 	}
 
-	log.Debug().Interface("info", info).Interface("node", n).Interface("metadata", metadata).Msg("cephfs: resolved filename")
+	log.Debug().Interface("info", info).Interface("node", n).Interface("metadata", metadata).Msg("mount: resolved filename")
 
 	upload, err := fs.NewUpload(ctx, info)
 	if err != nil {
@@ -184,31 +184,31 @@ func (fs *cephfs) UseIn(composer *tusd.StoreComposer) {
 func (fs *cephfs) NewUpload(ctx context.Context, info tusd.FileInfo) (upload tusd.Upload, err error) {
 
 	log := appctx.GetLogger(ctx)
-	log.Debug().Interface("info", info).Msg("cephfs: NewUpload")
+	log.Debug().Interface("info", info).Msg("mount: NewUpload")
 
 	fn := info.MetaData["filename"]
 	if fn == "" {
-		return nil, errors.New("cephfs: missing filename in metadata")
+		return nil, errors.New("mount: missing filename in metadata")
 	}
 	info.MetaData["filename"] = filepath.Clean(info.MetaData["filename"])
 
 	dir := info.MetaData["dir"]
 	if dir == "" {
-		return nil, errors.New("cephfs: missing dir in metadata")
+		return nil, errors.New("mount: missing dir in metadata")
 	}
 	info.MetaData["dir"] = filepath.Clean(info.MetaData["dir"])
 
 	n, err := fs.lu.NodeFromPath(ctx, filepath.Join(info.MetaData["dir"], info.MetaData["filename"]))
 	if err != nil {
-		return nil, errors.Wrap(err, "cephfs: error wrapping filename")
+		return nil, errors.Wrap(err, "mount: error wrapping filename")
 	}
 
-	log.Debug().Interface("info", info).Interface("node", n).Msg("cephfs: resolved filename")
+	log.Debug().Interface("info", info).Interface("node", n).Msg("mount: resolved filename")
 
 	// the parent owner will become the new owner
 	p, perr := n.Parent()
 	if perr != nil {
-		return nil, errors.Wrap(perr, "cephfs: error getting parent "+n.ParentID)
+		return nil, errors.Wrap(perr, "mount: error getting parent "+n.ParentID)
 	}
 
 	// check permissions
@@ -235,13 +235,13 @@ func (fs *cephfs) NewUpload(ctx context.Context, info tusd.FileInfo) (upload tus
 
 	binPath, err := fs.getUploadPath(ctx, info.ID)
 	if err != nil {
-		return nil, errors.Wrap(err, "cephfs: error resolving upload path")
+		return nil, errors.Wrap(err, "mount: error resolving upload path")
 	}
 	usr := user.ContextMustGetUser(ctx)
 
 	owner, err := p.Owner()
 	if err != nil {
-		return nil, errors.Wrap(err, "cephfs: error determining owner")
+		return nil, errors.Wrap(err, "mount: error determining owner")
 	}
 
 	info.Storage = map[string]string{
@@ -262,7 +262,7 @@ func (fs *cephfs) NewUpload(ctx context.Context, info tusd.FileInfo) (upload tus
 		"LogLevel": log.GetLevel().String(),
 	}
 	// Create binary file in the upload folder with no content
-	log.Debug().Interface("info", info).Msg("cephfs: built storage info")
+	log.Debug().Interface("info", info).Msg("mount: built storage info")
 	file, err := os.OpenFile(binPath, os.O_CREATE|os.O_WRONLY, defaultFilePerm)
 	if err != nil {
 		return nil, err
@@ -278,7 +278,7 @@ func (fs *cephfs) NewUpload(ctx context.Context, info tusd.FileInfo) (upload tus
 	}
 
 	if !info.SizeIsDeferred && info.Size == 0 {
-		log.Debug().Interface("info", info).Msg("cephfs: finishing upload for empty file")
+		log.Debug().Interface("info", info).Msg("mount: finishing upload for empty file")
 		// no need to create info file and finish directly
 		err := u.FinishUpload(ctx)
 		if err != nil {
@@ -439,7 +439,7 @@ func (upload *fileUpload) FinishUpload(ctx context.Context) (err error) {
 	{
 		f, err := os.Open(upload.binPath)
 		if err != nil {
-			sublog.Err(err).Msg("cephfs: could not open file for checksumming")
+			sublog.Err(err).Msg("mount: could not open file for checksumming")
 			// we can continue if no oc checksum header is set
 		}
 		defer f.Close()
@@ -448,7 +448,7 @@ func (upload *fileUpload) FinishUpload(ctx context.Context) (err error) {
 		r2 := io.TeeReader(r1, md5h)
 
 		if _, err := io.Copy(adler32h, r2); err != nil {
-			sublog.Err(err).Msg("cephfs: could not copy bytes for checksumming")
+			sublog.Err(err).Msg("mount: could not copy bytes for checksumming")
 		}
 	}
 	// compare if they match the sent checksum
@@ -484,7 +484,7 @@ func (upload *fileUpload) FinishUpload(ctx context.Context) (err error) {
 		if err = os.Rename(targetPath, versionsPath); err != nil {
 			sublog.Err(err).
 				Str("versionsPath", versionsPath).
-				Msg("cephfs: could not create version")
+				Msg("mount: could not create version")
 			return
 		}
 	}
@@ -494,7 +494,7 @@ func (upload *fileUpload) FinishUpload(ctx context.Context) (err error) {
 	// TODO trigger a workflow as the final rename might eg involve antivirus scanning
 	if err = os.Rename(upload.binPath, targetPath); err != nil {
 		sublog.Err(err).
-			Msg("cephfs: could not rename")
+			Msg("mount: could not rename")
 		return
 	}
 
@@ -509,7 +509,7 @@ func (upload *fileUpload) FinishUpload(ctx context.Context) (err error) {
 		OpaqueId: upload.info.Storage["OwnerId"],
 	})
 	if err != nil {
-		return errors.Wrap(err, "cephfs: could not write metadata")
+		return errors.Wrap(err, "mount: could not write metadata")
 	}
 
 	// link child name to parent if it is new
@@ -521,22 +521,22 @@ func (upload *fileUpload) FinishUpload(ctx context.Context) (err error) {
 			Interface("node", n).
 			Str("childNameLink", childNameLink).
 			Str("link", link).
-			Msg("cephfs: child name link has wrong target id, repairing")
+			Msg("mount: child name link has wrong target id, repairing")
 
 		if err = os.Remove(childNameLink); err != nil {
-			return errors.Wrap(err, "cephfs: could not remove symlink child entry")
+			return errors.Wrap(err, "mount: could not remove symlink child entry")
 		}
 	}
 	if os.IsNotExist(err) || link != "../"+n.ID {
 		if err = os.Symlink("../"+n.ID, childNameLink); err != nil {
-			return errors.Wrap(err, "cephfs: could not symlink child entry")
+			return errors.Wrap(err, "mount: could not symlink child entry")
 		}
 	}
 
 	// only delete the upload if it was successfully written to the storage
 	if err = os.Remove(upload.infoPath); err != nil {
 		if !os.IsNotExist(err) {
-			sublog.Err(err).Msg("cephfs: could not delete upload info")
+			sublog.Err(err).Msg("mount: could not delete upload info")
 			return
 		}
 	}
@@ -544,7 +544,7 @@ func (upload *fileUpload) FinishUpload(ctx context.Context) (err error) {
 	/*if upload.info.MetaData["mtime"] != "" {
 		err := upload.fs.SetMtime(ctx, np, upload.info.MetaData["mtime"])
 		if err != nil {
-			log.Err(err).Interface("info", upload.info).Msg("cephfs: could not set mtime metadata")
+			log.Err(err).Interface("info", upload.info).Msg("mount: could not set mtime metadata")
 			return err
 		}
 	}*/
@@ -566,7 +566,7 @@ func tryWritingChecksum(log *zerolog.Logger, n *Node, algo string, h hash.Hash) 
 		log.Err(err).
 			Str("csType", algo).
 			Bytes("hash", h.Sum(nil)).
-			Msg("cephfs: could not write checksum")
+			Msg("mount: could not write checksum")
 		// this is not critical, the bytes are there so we will continue
 	}
 }
@@ -574,7 +574,7 @@ func tryWritingChecksum(log *zerolog.Logger, n *Node, algo string, h hash.Hash) 
 func (upload *fileUpload) discardChunk() {
 	if err := os.Remove(upload.binPath); err != nil {
 		if !os.IsNotExist(err) {
-			appctx.GetLogger(upload.ctx).Err(err).Interface("info", upload.info).Str("binPath", upload.binPath).Interface("info", upload.info).Msg("cephfs: could not discard chunk")
+			appctx.GetLogger(upload.ctx).Err(err).Interface("info", upload.info).Str("binPath", upload.binPath).Interface("info", upload.info).Msg("mount: could not discard chunk")
 			return
 		}
 	}

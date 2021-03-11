@@ -48,7 +48,7 @@ func parseMTime(v string) (t time.Time, err error) {
 func (fs *cephfs) SetArbitraryMetadata(ctx context.Context, ref *provider.Reference, md *provider.ArbitraryMetadata) (err error) {
 	n, err := fs.lu.NodeFromResource(ctx, ref)
 	if err != nil {
-		return errors.Wrap(err, "cephfs: error resolving ref")
+		return errors.Wrap(err, "mount: error resolving ref")
 	}
 	sublog := appctx.GetLogger(ctx).With().Interface("node", n).Logger()
 
@@ -115,7 +115,7 @@ func (fs *cephfs) SetArbitraryMetadata(ctx context.Context, ref *provider.Refere
 	for k, v := range md.Metadata {
 		attrName := metadataPrefix + k
 		if err = xattr.Set(nodePath, attrName, []byte(v)); err != nil {
-			errs = append(errs, errors.Wrap(err, "cephfs: could not set metadata attribute "+attrName+" to "+k))
+			errs = append(errs, errors.Wrap(err, "mount: could not set metadata attribute "+attrName+" to "+k))
 		}
 	}
 
@@ -135,7 +135,7 @@ func (fs *cephfs) SetArbitraryMetadata(ctx context.Context, ref *provider.Refere
 func (fs *cephfs) UnsetArbitraryMetadata(ctx context.Context, ref *provider.Reference, keys []string) (err error) {
 	n, err := fs.lu.NodeFromResource(ctx, ref)
 	if err != nil {
-		return errors.Wrap(err, "cephfs: error resolving ref")
+		return errors.Wrap(err, "mount: error resolving ref")
 	}
 	sublog := appctx.GetLogger(ctx).With().Interface("node", n).Logger()
 

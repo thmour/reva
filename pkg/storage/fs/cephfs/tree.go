@@ -21,6 +21,7 @@ package cephfs
 import (
 	"context"
 	cephfs2 "github.com/ceph/go-ceph/cephfs"
+	"github.com/cs3org/reva/pkg/user"
 	"os"
 	"path/filepath"
 	"time"
@@ -36,11 +37,11 @@ import (
 // Tree manages a hierarchical tree
 type Tree struct {
 	lu *Lookup
-	cl *CephClient
+	cl *CephClientPool
 }
 
 // NewTree creates a new Tree instance
-func NewTree(lu *Lookup, cl *CephClient) (TreePersistence, error) {
+func NewTree(lu *Lookup, cl *CephClientPool) (TreePersistence, error) {
 	return &Tree{
 		lu: lu,
 		cl: cl,
@@ -79,7 +80,7 @@ func createNode(n *Node, owner *userpb.UserId, mount *cephfs2.MountInfo) (err er
 	nodePath := n.lu.toInternalPath(n.ID)
 
 	if err = mount.MakeDir(nodePath, 0700); err != nil {
-		return errors.Wrap(err, "cephfs: error creating node")
+		return errors.Wrap(err, "mount: error creating node")
 	}
 
 	return n.writeMetadata(owner)
@@ -87,7 +88,6 @@ func createNode(n *Node, owner *userpb.UserId, mount *cephfs2.MountInfo) (err er
 
 // CreateDir creates a new directory entry in the tree
 func (t *Tree) CreateDir(ctx context.Context, node *Node) (err error) {
-
 	if node.Exists || node.ID != "" {
 		return errtypes.AlreadyExists(node.ID) // path?
 	}
@@ -107,13 +107,14 @@ func (t *Tree) CreateDir(ctx context.Context, node *Node) (err error) {
 		return
 	}
 
-	err = createNode(node, owner, t.cl.cephfs)
+	mount, err := t.cl.get(user.ContextMustGetUser(ctx)); if err != nil { return }
+	err = createNode(node, owner, mount)
 	if err != nil {
 		return nil
 	}
 
 	// make child appear in listings
-	err = t.cl.cephfs.Symlink("../"+node.ID, filepath.Join(t.lu.toInternalPath(node.ParentID), node.Name))
+	err = mount.Symlink("../"+node.ID, filepath.Join(t.lu.toInternalPath(node.ParentID), node.Name))
 	if err != nil {
 		return
 	}
@@ -123,10 +124,11 @@ func (t *Tree) CreateDir(ctx context.Context, node *Node) (err error) {
 // Move replaces the target with the source
 func (t *Tree) Move(ctx context.Context, oldNode *Node, newNode *Node) (err error) {
 	// if target exists delete it without trashing it
+	mount, err := t.cl.get(user.ContextMustGetUser(ctx)); if err != nil { return }
 	if newNode.Exists {
 		// TODO make sure all children are deleted
-		if err := t.cl.cephfs.RemoveDir(t.lu.toInternalPath(newNode.ID)); err != nil {
-			return errors.Wrap(err, "cephfs: Move: error deleting target node "+newNode.ID)
+		if err := mount.RemoveDir(t.lu.toInternalPath(newNode.ID)); err != nil {
+			return errors.Wrap(err, "mount: Move: error deleting target node "+newNode.ID)
 		}
 	}
 
@@ -141,17 +143,17 @@ func (t *Tree) Move(ctx context.Context, oldNode *Node, newNode *Node) (err erro
 		parentPath := t.lu.toInternalPath(oldNode.ParentID)
 
 		// rename child
-		err = t.cl.cephfs.Rename(
+		err = mount.Rename(
 			filepath.Join(parentPath, oldNode.Name),
 			filepath.Join(parentPath, newNode.Name),
 		)
 		if err != nil {
-			return errors.Wrap(err, "cephfs: could not rename child")
+			return errors.Wrap(err, "mount: could not rename child")
 		}
 
 		// update name attribute
-		if err := t.cl.cephfs.SetXattr(tgtPath, nameAttr, []byte(newNode.Name), 0); err != nil {
-			return errors.Wrap(err, "cephfs: could not set name attribute")
+		if err := mount.SetXattr(tgtPath, nameAttr, []byte(newNode.Name), 0); err != nil {
+			return errors.Wrap(err, "mount: could not set name attribute")
 		}
 
 		return t.Propagate(ctx, newNode)
@@ -161,20 +163,20 @@ func (t *Tree) Move(ctx context.Context, oldNode *Node, newNode *Node) (err erro
 	// bring old node to the new parent
 
 	// rename child
-	err = t.cl.cephfs.Rename(
+	err = mount.Rename(
 		filepath.Join(t.lu.toInternalPath(oldNode.ParentID), oldNode.Name),
 		filepath.Join(t.lu.toInternalPath(newNode.ParentID), newNode.Name),
 	)
 	if err != nil {
-		return errors.Wrap(err, "cephfs: could not move child")
+		return errors.Wrap(err, "mount: could not move child")
 	}
 
 	// update target parentid and name
-	if err := t.cl.cephfs.SetXattr(tgtPath, parentidAttr, []byte(newNode.ParentID), 0); err != nil {
-		return errors.Wrap(err, "cephfs: could not set parentid attribute")
+	if err := mount.SetXattr(tgtPath, parentidAttr, []byte(newNode.ParentID), 0); err != nil {
+		return errors.Wrap(err, "mount: could not set parentid attribute")
 	}
-	if err := t.cl.cephfs.SetXattr(tgtPath, nameAttr, []byte(newNode.Name), 0); err != nil {
-		return errors.Wrap(err, "cephfs: could not set name attribute")
+	if err := mount.SetXattr(tgtPath, nameAttr, []byte(newNode.Name), 0); err != nil {
+		return errors.Wrap(err, "mount: could not set name attribute")
 	}
 
 	// TODO inefficient because we might update several nodes twice, only propagate unchanged nodes?
@@ -183,11 +185,11 @@ func (t *Tree) Move(ctx context.Context, oldNode *Node, newNode *Node) (err erro
 
 	err = t.Propagate(ctx, oldNode)
 	if err != nil {
-		return errors.Wrap(err, "cephfs: Move: could not propagate old node")
+		return errors.Wrap(err, "mount: Move: could not propagate old node")
 	}
 	err = t.Propagate(ctx, newNode)
 	if err != nil {
-		return errors.Wrap(err, "cephfs: Move: could not propagate new node")
+		return errors.Wrap(err, "mount: Move: could not propagate new node")
 	}
 	return nil
 }
@@ -195,7 +197,7 @@ func (t *Tree) Move(ctx context.Context, oldNode *Node, newNode *Node) (err erro
 // ListFolder lists the content of a folder node
 func (t *Tree) ListFolder(ctx context.Context, node *Node) ([]*Node, error) {
 	dir := t.lu.toInternalPath(node.ID)
-	f, err := t.cl.cephfs.OpenDir(dir)
+	f, err := t.cl.mount.OpenDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, errtypes.NotFound(dir)
@@ -214,7 +216,7 @@ func (t *Tree) ListFolder(ctx context.Context, node *Node) ([]*Node, error) {
 	}
 	nodes := []*Node{}
 	for i := range names {
-		link, err := t.cl.cephfs.Readlink(filepath.Join(dir, names[i]))
+		link, err := t.cl.mount.Readlink(filepath.Join(dir, names[i]))
 		if err != nil {
 			// TODO log
 			continue
@@ -246,7 +248,7 @@ func (t *Tree) Delete(ctx context.Context, n *Node) (err error) {
 		// fall back to root trash
 		o.OpaqueId = "root"
 	}
-	err = t.cl.cephfs.MakeDir(filepath.Join(t.lu.Options.Root, "trash", o.OpaqueId), 0700)
+	err = t.cl.mount.MakeDir(filepath.Join(t.lu.Options.Root, "trash", o.OpaqueId), 0700)
 	if err != nil {
 		return
 	}
@@ -259,7 +261,7 @@ func (t *Tree) Delete(ctx context.Context, n *Node) (err error) {
 
 	// set origin location in metadata
 	nodePath := t.lu.toInternalPath(n.ID)
-	if err := t.cl.cephfs.SetXattr(nodePath, trashOriginAttr, []byte(origin), 0); err != nil {
+	if err := t.cl.mount.SetXattr(nodePath, trashOriginAttr, []byte(origin), 0); err != nil {
 		return err
 	}
 
@@ -268,7 +270,7 @@ func (t *Tree) Delete(ctx context.Context, n *Node) (err error) {
 	// first make node appear in the owners (or root) trash
 	// parent id and name are stored as extended attributes in the node itself
 	trashLink := filepath.Join(t.lu.Options.Root, "trash", o.OpaqueId, n.ID)
-	err = t.cl.cephfs.Symlink("../../nodes/"+n.ID+".T."+deletionTime, trashLink)
+	err = t.cl.mount.Symlink("../../nodes/"+n.ID+".T."+deletionTime, trashLink)
 	if err != nil {
 		// To roll back changes
 		// TODO unset trashOriginAttr
@@ -279,7 +281,7 @@ func (t *Tree) Delete(ctx context.Context, n *Node) (err error) {
 
 	// rename the trashed node so it is not picked up when traversing up the tree and matches the symlink
 	trashPath := nodePath + ".T." + deletionTime
-	err = t.cl.cephfs.Rename(nodePath, trashPath)
+	err = t.cl.mount.Rename(nodePath, trashPath)
 	if err != nil {
 		// To roll back changes
 		// TODO remove symlink
@@ -290,7 +292,7 @@ func (t *Tree) Delete(ctx context.Context, n *Node) (err error) {
 	// finally remove the entry from the parent dir
 	src := filepath.Join(t.lu.toInternalPath(n.ParentID), n.Name)
 
-	err = t.cl.cephfs.Unlink(src)
+	err = t.cl.mount.Unlink(src)
 	if err != nil {
 		// To roll back changes
 		// TODO revert the rename
@@ -301,7 +303,7 @@ func (t *Tree) Delete(ctx context.Context, n *Node) (err error) {
 
 	p, err := n.Parent()
 	if err != nil {
-		return errors.Wrap(err, "cephfs: error getting parent "+n.ParentID)
+		return errors.Wrap(err, "mount: error getting parent "+n.ParentID)
 	}
 	return t.Propagate(ctx, p)
 }

@@ -112,7 +112,7 @@ func (lu *Lookup) RootNode(ctx context.Context) (node *Node, err error) {
 // HomeNode returns the home node of a user
 func (lu *Lookup) HomeNode(ctx context.Context) (node *Node, err error) {
 	if !lu.Options.EnableHome {
-		return nil, errtypes.NotSupported("cephfs: home supported disabled")
+		return nil, errtypes.NotSupported("mount: home supported disabled")
 	}
 
 	if node, err = lu.RootNode(ctx); err != nil {

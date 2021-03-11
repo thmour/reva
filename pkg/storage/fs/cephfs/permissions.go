@@ -123,7 +123,7 @@ func (p *Permissions) AssemblePermissions(ctx context.Context, n *Node) (ap *pro
 		}
 
 		if cn, err = cn.Parent(); err != nil {
-			return ap, errors.Wrap(err, "cephfs: error getting parent "+cn.ParentID)
+			return ap, errors.Wrap(err, "mount: error getting parent "+cn.ParentID)
 		}
 	}
 
@@ -223,7 +223,7 @@ func (p *Permissions) HasPermission(ctx context.Context, n *Node, check func(*pr
 		}
 
 		if cn, err = cn.Parent(); err != nil {
-			return false, errors.Wrap(err, "cephfs: error getting parent "+cn.ParentID)
+			return false, errors.Wrap(err, "mount: error getting parent "+cn.ParentID)
 		}
 	}
 
